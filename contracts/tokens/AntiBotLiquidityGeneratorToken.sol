@@ -877,6 +877,21 @@ interface IUniswapV2Factory {
 }
 
 
+// Dependency file: contracts/interfaces/IPinkAntiBot.sol
+
+// pragma solidity >=0.5.0;
+
+interface IPinkAntiBot {
+  function setTokenOwner(address owner) external;
+
+  function onPreTransferCheck(
+    address from,
+    address to,
+    uint256 amount
+  ) external;
+}
+
+
 // Dependency file: contracts/BaseToken.sol
 
 // pragma solidity =0.8.4;
@@ -902,7 +917,7 @@ abstract contract BaseToken {
 }
 
 
-// Root file: contracts/liquidity-generator/LiquidityGeneratorToken.sol
+// Root file: contracts/liquidity-generator/AntiBotLiquidityGeneratorToken.sol
 
 pragma solidity =0.8.4;
 
@@ -912,9 +927,10 @@ pragma solidity =0.8.4;
 // import "@openzeppelin/contracts/utils/Address.sol";
 // import "contracts/interfaces/IUniswapV2Router02.sol";
 // import "contracts/interfaces/IUniswapV2Factory.sol";
+// import "contracts/interfaces/IPinkAntiBot.sol";
 // import "contracts/BaseToken.sol";
 
-contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
+contract AntiBotLiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     using SafeMath for uint256;
     using Address for address;
 
@@ -955,6 +971,9 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
 
     uint256 private numTokensSellToAddToLiquidity;
 
+    IPinkAntiBot public pinkAntiBot;
+    bool public enableAntiBot;
+
     event MinTokensBeforeSwapUpdated(uint256 minTokensBeforeSwap);
     event SwapAndLiquifyEnabledUpdated(bool enabled);
     event SwapAndLiquify(
@@ -978,12 +997,19 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
         uint16 taxFeeBps_,
         uint16 liquidityFeeBps_,
         uint16 charityFeeBps_,
+        address pinkAntiBot_,
         address serviceFeeReceiver_,
         uint256 serviceFee_
     ) payable {
-        require(taxFeeBps_ >= 0, "Invalid tax fee");
-        require(liquidityFeeBps_ >= 0, "Invalid liquidity fee");
-        require(charityFeeBps_ >= 0, "Invalid charity fee");
+        require(taxFeeBps_ >= 0 && taxFeeBps_ <= 10**4, "Invalid tax fee");
+        require(
+            liquidityFeeBps_ >= 0 && liquidityFeeBps_ <= 10**4,
+            "Invalid liquidity fee"
+        );
+        require(
+            charityFeeBps_ >= 0 && charityFeeBps_ <= 10**4,
+            "Invalid charity fee"
+        );
         if (charityAddress_ == address(0)) {
             require(
                 charityFeeBps_ == 0,
@@ -991,9 +1017,13 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
             );
         }
         require(
-            taxFeeBps_ + liquidityFeeBps_ + charityFeeBps_ <= 10**4 / 4,
-            "Total fee is over 25%"
+            taxFeeBps_ + liquidityFeeBps_ + charityFeeBps_ <= 10**4,
+            "Total fee is over 100% of transfer amount"
         );
+
+        pinkAntiBot = IPinkAntiBot(pinkAntiBot_);
+        pinkAntiBot.setTokenOwner(owner());
+        enableAntiBot = true;
 
         _name = name_;
         _symbol = symbol_;
@@ -1035,11 +1065,15 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
         emit TokenCreated(
             owner(),
             address(this),
-            TokenType.liquidityGenerator,
+            TokenType.antiBotLiquidityGenerator,
             VERSION
         );
 
         payable(serviceFeeReceiver_).transfer(serviceFee_);
+    }
+
+    function setEnableAntiBot(bool _enable) external onlyOwner {
+        enableAntiBot = _enable;
     }
 
     function name() public view returns (string memory) {
@@ -1240,22 +1274,19 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     }
 
     function setTaxFeePercent(uint256 taxFeeBps) external onlyOwner {
+        require(taxFeeBps >= 0 && taxFeeBps <= 10**4, "Invalid bps");
         _taxFee = taxFeeBps;
-        require(
-            _taxFee + _liquidityFee + _charityFee <= 10**4 / 4,
-            "Total fee is over 25%"
-        );
     }
 
     function setLiquidityFeePercent(uint256 liquidityFeeBps)
         external
         onlyOwner
     {
-        _liquidityFee = liquidityFeeBps;
         require(
-            _taxFee + _liquidityFee + _charityFee <= 10**4 / 4,
-            "Total fee is over 25%"
+            liquidityFeeBps >= 0 && liquidityFeeBps <= 10**4,
+            "Invalid bps"
         );
+        _liquidityFee = liquidityFeeBps;
     }
 
     function setSwapAndLiquifyEnabled(bool _enabled) public onlyOwner {
@@ -1456,6 +1487,10 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
         require(from != address(0), "ERC20: transfer from the zero address");
         require(to != address(0), "ERC20: transfer to the zero address");
         require(amount > 0, "Transfer amount must be greater than zero");
+
+        if (enableAntiBot) {
+            pinkAntiBot.onPreTransferCheck(from, to, amount);
+        }
 
         // is the token balance of this contract address over the min number of
         // tokens that we need to initiate a swap + liquidity lock?
