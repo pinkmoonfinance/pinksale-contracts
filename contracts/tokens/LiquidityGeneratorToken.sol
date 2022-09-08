@@ -918,7 +918,9 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     using SafeMath for uint256;
     using Address for address;
 
-    uint256 public constant VERSION = 1;
+    uint256 public constant VERSION = 2;
+
+    uint256 public constant MAX_FEE = 10**4 / 4;
 
     mapping(address => uint256) private _rOwned;
     mapping(address => uint256) private _tOwned;
@@ -938,13 +940,13 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     uint8 private _decimals;
 
     uint256 public _taxFee;
-    uint256 private _previousTaxFee = _taxFee;
+    uint256 private _previousTaxFee;
 
     uint256 public _liquidityFee;
-    uint256 private _previousLiquidityFee = _liquidityFee;
+    uint256 private _previousLiquidityFee;
 
     uint256 public _charityFee;
-    uint256 private _previousCharityFee = _charityFee;
+    uint256 private _previousCharityFee;
 
     IUniswapV2Router02 public uniswapV2Router;
     address public uniswapV2Pair;
@@ -956,7 +958,7 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     uint256 private numTokensSellToAddToLiquidity;
 
     event MinTokensBeforeSwapUpdated(uint256 minTokensBeforeSwap);
-    event SwapAndLiquifyEnabledUpdated(bool enabled);
+    event SwapAndLiquifyAmountUpdated(uint256 amount);
     event SwapAndLiquify(
         uint256 tokensSwapped,
         uint256 ethReceived,
@@ -981,9 +983,6 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
         address serviceFeeReceiver_,
         uint256 serviceFee_
     ) payable {
-        require(taxFeeBps_ >= 0, "Invalid tax fee");
-        require(liquidityFeeBps_ >= 0, "Invalid liquidity fee");
-        require(charityFeeBps_ >= 0, "Invalid charity fee");
         if (charityAddress_ == address(0)) {
             require(
                 charityFeeBps_ == 0,
@@ -991,7 +990,7 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
             );
         }
         require(
-            taxFeeBps_ + liquidityFeeBps_ + charityFeeBps_ <= 10**4 / 4,
+            taxFeeBps_ + liquidityFeeBps_ + charityFeeBps_ <= MAX_FEE,
             "Total fee is over 25%"
         );
 
@@ -1012,7 +1011,7 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
         _charityFee = charityFeeBps_;
         _previousCharityFee = _charityFee;
 
-        numTokensSellToAddToLiquidity = totalSupply_.mul(5).div(10**4); // 0.05%
+        numTokensSellToAddToLiquidity = totalSupply_.div(10**3); // 0.1%
 
         swapAndLiquifyEnabled = true;
 
@@ -1235,14 +1234,10 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
         _isExcludedFromFee[account] = true;
     }
 
-    function includeInFee(address account) public onlyOwner {
-        _isExcludedFromFee[account] = false;
-    }
-
     function setTaxFeePercent(uint256 taxFeeBps) external onlyOwner {
         _taxFee = taxFeeBps;
         require(
-            _taxFee + _liquidityFee + _charityFee <= 10**4 / 4,
+            _taxFee + _liquidityFee + _charityFee <= MAX_FEE,
             "Total fee is over 25%"
         );
     }
@@ -1253,14 +1248,26 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     {
         _liquidityFee = liquidityFeeBps;
         require(
-            _taxFee + _liquidityFee + _charityFee <= 10**4 / 4,
+            _taxFee + _liquidityFee + _charityFee <= MAX_FEE,
             "Total fee is over 25%"
         );
     }
 
-    function setSwapAndLiquifyEnabled(bool _enabled) public onlyOwner {
-        swapAndLiquifyEnabled = _enabled;
-        emit SwapAndLiquifyEnabledUpdated(_enabled);
+    function setCharityFeePercent(uint256 charityFeeBps) external onlyOwner {
+        _charityFee = charityFeeBps;
+        require(
+            _taxFee + _liquidityFee + _charityFee <= MAX_FEE,
+            "Total fee is over 25%"
+        );
+    }
+
+    function setSwapBackSettings(uint256 _amount) external onlyOwner {
+        require(
+            _amount >= totalSupply().mul(5).div(10**4),
+            "Swapback amount should be at least 0.05% of total supply"
+        );
+        numTokensSellToAddToLiquidity = _amount;
+        emit SwapAndLiquifyAmountUpdated(_amount);
     }
 
     //to recieve ETH from uniswapV2Router when swaping
@@ -1415,8 +1422,6 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
     }
 
     function removeAllFee() private {
-        if (_taxFee == 0 && _liquidityFee == 0 && _charityFee == 0) return;
-
         _previousTaxFee = _taxFee;
         _previousLiquidityFee = _liquidityFee;
         _previousCharityFee = _charityFee;
@@ -1539,7 +1544,7 @@ contract LiquidityGeneratorToken is IERC20, Ownable, BaseToken {
             tokenAmount,
             0, // slippage is unavoidable
             0, // slippage is unavoidable
-            owner(),
+            address(0xdead),
             block.timestamp
         );
     }

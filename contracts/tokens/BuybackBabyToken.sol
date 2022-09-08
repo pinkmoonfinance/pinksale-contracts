@@ -945,7 +945,7 @@ pragma solidity =0.8.4;
 contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
     using SafeMath for uint256;
 
-    uint256 public constant VERSION = 1;
+    uint256 public constant VERSION = 2;
 
     address private constant DEAD = address(0xdead);
     address private constant ZERO = address(0);
@@ -958,7 +958,6 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
     address public rewardToken;
     IUniswapV2Router02 public router;
     address public pair;
-    address public autoLiquidityReceiver;
     address public marketingFeeReceiver;
 
     uint256 public liquidityFee; // default: 200
@@ -1038,9 +1037,9 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         _initializeFees(feeSettings_);
         _initializeLiquidityBuyBack();
 
-        distributorGas = 500000;
+        distributorGas = 500_000;
         swapEnabled = true;
-        swapThreshold = _totalSupply / 20000; // 0.005%
+        swapThreshold = _totalSupply / 1000; // 0.1%
 
         isFeeExempt[msg.sender] = true;
         isDividendExempt[pair] = true;
@@ -1048,7 +1047,6 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         isDividendExempt[DEAD] = true;
         buyBacker[msg.sender] = true;
 
-        autoLiquidityReceiver = msg.sender;
         marketingFeeReceiver = msg.sender;
 
         _allowances[address(this)][address(router)] = _totalSupply;
@@ -1209,7 +1207,7 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
     }
 
     function shouldTakeFee(address sender) internal view returns (bool) {
-        return !isFeeExempt[sender];
+        return !isFeeExempt[sender] && totalFee > 0;
     }
 
     function getTotalFee(bool selling) public view returns (uint256) {
@@ -1231,10 +1229,14 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
                 .mul(buybackMultiplierNumerator)
                 .div(buybackMultiplierDenominator)
                 .sub(totalFee);
+
+            uint256 increasedFee = totalFee.add(
+                feeIncrease.mul(remainingTime).div(buybackMultiplierLength)
+            );
             return
-                totalFee.add(
-                    feeIncrease.mul(remainingTime).div(buybackMultiplierLength)
-                );
+                increasedFee > feeDenominator / 4
+                    ? feeDenominator / 4
+                    : increasedFee;
         }
         return totalFee;
     }
@@ -1269,10 +1271,13 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         )
             ? 0
             : liquidityFee;
-        uint256 amountToLiquify = swapThreshold
-            .mul(dynamicLiquidityFee)
-            .div(totalFee)
-            .div(2);
+        uint256 amountToLiquify;
+        if (totalFee > 0) {
+            amountToLiquify = swapThreshold
+                .mul(dynamicLiquidityFee)
+                .div(totalFee)
+                .div(2);
+        }
         uint256 amountToSwap = swapThreshold.sub(amountToLiquify);
 
         address[] memory path = new address[](2);
@@ -1292,27 +1297,31 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
 
         uint256 totalBNBFee = totalFee.sub(dynamicLiquidityFee.div(2));
 
-        uint256 amountBNBLiquidity = amountBNB
-            .mul(dynamicLiquidityFee)
-            .div(totalBNBFee)
-            .div(2);
-        uint256 amountBNBReflection = amountBNB.mul(reflectionFee).div(
-            totalBNBFee
-        );
-        uint256 amountBNBMarketing = amountBNB.mul(marketingFee).div(
-            totalBNBFee
-        );
+        uint256 amountBNBLiquidity;
+        if (totalBNBFee > 0) {
+            amountBNBLiquidity = amountBNB
+                .mul(dynamicLiquidityFee)
+                .div(totalBNBFee)
+                .div(2);
 
-        try distributor.deposit{ value: amountBNBReflection }() {} catch {}
-        payable(marketingFeeReceiver).transfer(amountBNBMarketing);
+            uint256 amountBNBReflection = amountBNB.mul(reflectionFee).div(
+                totalBNBFee
+            );
+            uint256 amountBNBMarketing = amountBNB.mul(marketingFee).div(
+                totalBNBFee
+            );
+
+            try distributor.deposit{value: amountBNBReflection}() {} catch {}
+            payable(marketingFeeReceiver).transfer(amountBNBMarketing);
+        }
 
         if (amountToLiquify > 0) {
-            router.addLiquidityETH{ value: amountBNBLiquidity }(
+            router.addLiquidityETH{value: amountBNBLiquidity}(
                 address(this),
                 amountToLiquify,
                 0,
                 0,
-                autoLiquidityReceiver,
+                DEAD,
                 block.timestamp
             );
             emit AutoLiquify(amountBNBLiquidity, amountToLiquify);
@@ -1368,6 +1377,7 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         uint256 _amount,
         uint256 _period
     ) external authorized {
+        require(_period > 0, "Period must be greater than 0");
         autoBuybackEnabled = _enabled;
         autoBuybackCap = _cap;
         autoBuybackAccumulator = 0;
@@ -1381,6 +1391,7 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         uint256 denominator,
         uint256 length
     ) external authorized {
+        require(length <= 2 hours, "Length must be less than 2 hours");
         require(numerator / denominator <= 2 && numerator > denominator);
         buybackMultiplierNumerator = numerator;
         buybackMultiplierDenominator = denominator;
@@ -1400,8 +1411,8 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         }
     }
 
-    function setIsFeeExempt(address holder, bool exempt) external authorized {
-        isFeeExempt[holder] = exempt;
+    function setIsFeeExempt(address holder) external authorized {
+        isFeeExempt[holder] = true;
     }
 
     function setBuyBacker(address acc, bool add) external authorized {
@@ -1440,16 +1451,15 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         );
         feeDenominator = _feeDenominator;
         require(
-            totalFee < feeDenominator / 4,
+            totalFee <= feeDenominator / 4,
             "Total fee should not be greater than 1/4 of fee denominator"
         );
     }
 
-    function setFeeReceivers(
-        address _autoLiquidityReceiver,
-        address _marketingFeeReceiver
-    ) external authorized {
-        autoLiquidityReceiver = _autoLiquidityReceiver;
+    function setFeeReceivers(address _marketingFeeReceiver)
+        external
+        authorized
+    {
         marketingFeeReceiver = _marketingFeeReceiver;
     }
 
@@ -1457,6 +1467,10 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         external
         authorized
     {
+        require(
+            _enabled && _amount >= _totalSupply / 100_000,
+            "Swapback amount should be at least 0.001% of total supply"
+        );
         swapEnabled = _enabled;
         swapThreshold = _amount;
     }
@@ -1465,6 +1479,7 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
         external
         authorized
     {
+        require(_denominator > 0, "Denominator must be greater than 0");
         targetLiquidity = _target;
         targetLiquidityDenominator = _denominator;
     }
@@ -1472,12 +1487,15 @@ contract BuybackBabyToken is IERC20Extended, Auth, BaseToken {
     function setDistributionCriteria(
         uint256 _minPeriod,
         uint256 _minDistribution
-    ) external authorized {
+    ) external onlyOwner {
         distributor.setDistributionCriteria(_minPeriod, _minDistribution);
     }
 
     function setDistributorSettings(uint256 gas) external authorized {
-        require(gas < 750000, "Gas must be lower than 750000");
+        require(
+            gas >= 200_000 && gas <= 500_000,
+            "gasForProcessing must be between 200,000 and 500,000"
+        );
         distributorGas = gas;
     }
 

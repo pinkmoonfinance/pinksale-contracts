@@ -2596,7 +2596,7 @@ pragma solidity =0.8.4;
 contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
     using SafeMath for uint256;
 
-    uint256 public constant VERSION = 1;
+    uint256 public constant VERSION = 2;
 
     IUniswapV2Router02 public uniswapV2Router;
     address public uniswapV2Pair;
@@ -2628,25 +2628,10 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
     IPinkAntiBot public pinkAntiBot;
     bool public enableAntiBot;
 
-    event UpdateDividendTracker(
-        address indexed newAddress,
-        address indexed oldAddress
-    );
-
-    event UpdateUniswapV2Router(
-        address indexed newAddress,
-        address indexed oldAddress
-    );
-
-    event ExcludeFromFees(address indexed account, bool isExcluded);
-    event ExcludeMultipleAccountsFromFees(address[] accounts, bool isExcluded);
+    event ExcludeFromFees(address indexed account);
+    event ExcludeMultipleAccountsFromFees(address[] accounts);
 
     event SetAutomatedMarketMakerPair(address indexed pair, bool indexed value);
-
-    event LiquidityWalletUpdated(
-        address indexed newLiquidityWallet,
-        address indexed oldLiquidityWallet
-    );
 
     event GasForProcessingUpdated(
         uint256 indexed newValue,
@@ -2696,7 +2681,7 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
         marketingFee = feeSettings[2];
         totalFees = tokenRewardsFee.add(liquidityFee).add(marketingFee);
         require(totalFees <= 25, "Total fee is over 25%");
-        swapTokensAtAmount = totalSupply_.mul(2).div(10**6); // 0.002%
+        swapTokensAtAmount = totalSupply_.div(1000); // 0.1%
 
         // use by default 300,000 gas to process auto-claiming dividends
         gasForProcessing = 300000;
@@ -2724,9 +2709,9 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
         dividendTracker.excludeFromDividends(address(0xdead));
         dividendTracker.excludeFromDividends(address(_uniswapV2Router));
         // exclude from paying fees or having max transaction amount
-        excludeFromFees(owner(), true);
-        excludeFromFees(_marketingWalletAddress, true);
-        excludeFromFees(address(this), true);
+        _isExcludedFromFees[owner()] = true;
+        _isExcludedFromFees[_marketingWalletAddress] = true;
+        _isExcludedFromFees[address(this)] = true;
         /*
             _mint is an internal function in ERC20.sol that is only called here,
             and CANNOT be called ever again
@@ -2750,68 +2735,39 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
     receive() external payable {}
 
     function setSwapTokensAtAmount(uint256 amount) external onlyOwner {
+        require(
+            amount > totalSupply() / 10**5,
+            "BABYTOKEN: Amount must be greater than 0.001% of total supply"
+        );
         swapTokensAtAmount = amount;
     }
 
-    function updateDividendTracker(address newAddress) public onlyOwner {
+    function excludeFromFees(address account) external onlyOwner {
         require(
-            newAddress != address(dividendTracker),
-            "BABYTOKEN: The dividend tracker already has that address"
+            !_isExcludedFromFees[account],
+            "BABYTOKEN: Account is already excluded"
         );
+        _isExcludedFromFees[account] = true;
 
-        BABYTOKENDividendTracker newDividendTracker = BABYTOKENDividendTracker(
-            payable(newAddress)
-        );
-
-        require(
-            newDividendTracker.owner() == address(this),
-            "BABYTOKEN: The new dividend tracker must be owned by the BABYTOKEN token contract"
-        );
-
-        newDividendTracker.excludeFromDividends(address(newDividendTracker));
-        newDividendTracker.excludeFromDividends(address(this));
-        newDividendTracker.excludeFromDividends(owner());
-        newDividendTracker.excludeFromDividends(address(uniswapV2Router));
-
-        emit UpdateDividendTracker(newAddress, address(dividendTracker));
-
-        dividendTracker = newDividendTracker;
+        emit ExcludeFromFees(account);
     }
 
-    function updateUniswapV2Router(address newAddress) public onlyOwner {
-        require(
-            newAddress != address(uniswapV2Router),
-            "BABYTOKEN: The router already has that address"
-        );
-        emit UpdateUniswapV2Router(newAddress, address(uniswapV2Router));
-        uniswapV2Router = IUniswapV2Router02(newAddress);
-        address _uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
-            .createPair(address(this), uniswapV2Router.WETH());
-        uniswapV2Pair = _uniswapV2Pair;
-    }
-
-    function excludeFromFees(address account, bool excluded) public onlyOwner {
-        require(
-            _isExcludedFromFees[account] != excluded,
-            "BABYTOKEN: Account is already the value of 'excluded'"
-        );
-        _isExcludedFromFees[account] = excluded;
-
-        emit ExcludeFromFees(account, excluded);
-    }
-
-    function excludeMultipleAccountsFromFees(
-        address[] calldata accounts,
-        bool excluded
-    ) public onlyOwner {
+    function excludeMultipleAccountsFromFees(address[] calldata accounts)
+        external
+        onlyOwner
+    {
         for (uint256 i = 0; i < accounts.length; i++) {
-            _isExcludedFromFees[accounts[i]] = excluded;
+            _isExcludedFromFees[accounts[i]] = true;
         }
 
-        emit ExcludeMultipleAccountsFromFees(accounts, excluded);
+        emit ExcludeMultipleAccountsFromFees(accounts);
     }
 
     function setMarketingWallet(address payable wallet) external onlyOwner {
+        require(
+            wallet != address(0),
+            "BABYTOKEN: The marketing wallet cannot be the value of zero"
+        );
         _marketingWalletAddress = wallet;
     }
 
@@ -2831,18 +2787,6 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
         marketingFee = value;
         totalFees = tokenRewardsFee.add(liquidityFee).add(marketingFee);
         require(totalFees <= 25, "Total fee is over 25%");
-    }
-
-    function setAutomatedMarketMakerPair(address pair, bool value)
-        public
-        onlyOwner
-    {
-        require(
-            pair != uniswapV2Pair,
-            "BABYTOKEN: The PancakeSwap pair cannot be removed from automatedMarketMakerPairs"
-        );
-
-        _setAutomatedMarketMakerPair(pair, value);
     }
 
     function _setAutomatedMarketMakerPair(address pair, bool value) private {
@@ -3019,22 +2963,29 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
             !swapping &&
             !automatedMarketMakerPairs[from] &&
             from != owner() &&
-            to != owner()
+            to != owner() &&
+            totalFees > 0
         ) {
             swapping = true;
 
-            uint256 marketingTokens = contractTokenBalance
-                .mul(marketingFee)
-                .div(totalFees);
-            swapAndSendToFee(marketingTokens);
+            if (marketingFee > 0) {
+                uint256 marketingTokens = contractTokenBalance
+                    .mul(marketingFee)
+                    .div(totalFees);
+                swapAndSendToFee(marketingTokens);
+            }
 
-            uint256 swapTokens = contractTokenBalance.mul(liquidityFee).div(
-                totalFees
-            );
-            swapAndLiquify(swapTokens);
+            if (liquidityFee > 0) {
+                uint256 swapTokens = contractTokenBalance.mul(liquidityFee).div(
+                    totalFees
+                );
+                swapAndLiquify(swapTokens);
+            }
 
             uint256 sellTokens = balanceOf(address(this));
-            swapAndSendDividends(sellTokens);
+            if (sellTokens > 0) {
+                swapAndSendDividends(sellTokens);
+            }
 
             swapping = false;
         }
@@ -3046,7 +2997,7 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
             takeFee = false;
         }
 
-        if (takeFee) {
+        if (takeFee && totalFees > 0) {
             uint256 fees = amount.mul(totalFees).div(100);
             if (automatedMarketMakerPairs[to]) {
                 fees += amount.mul(1).div(100);
@@ -3164,7 +3115,7 @@ contract AntiBotBABYTOKEN is ERC20, Ownable, BaseToken {
             tokenAmount,
             0, // slippage is unavoidable
             0, // slippage is unavoidable
-            address(0),
+            address(0xdead),
             block.timestamp
         );
     }
